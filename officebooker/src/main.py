@@ -6,6 +6,7 @@ Logs in, clicks Desk, configures the booking form, and searches for sites.
 import os
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -13,10 +14,13 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.common.action_chains import ActionChains
+from dotenv import load_dotenv, dotenv_values 
+
+load_dotenv(Path(__file__).parent / ".env")
 
 # ── Credentials ────────────────────────────────────────────────────────────────
-EMAIL    = "fecs@gmv.com"
-PASSWORD = "password"
+EMAIL    = os.environ["EMAIL"]
+PASSWORD = os.environ["PASSWORD"]
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 URL         = "https://webapp.bookkercorp.com/#/login"
@@ -25,10 +29,7 @@ HEADLESS    = os.getenv("HEADLESS", "false").lower() == "true"
 SCREENSHOTS = "screenshots"
 
 # Booking config — date must be in the future; times as they appear in the dropdown
-BOOKING_DATE       = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")  # tomorrow
-START_TIME         = "08:00"
-END_TIME           = "20:00"
-
+BOOKING_DATE       = (datetime.today() + timedelta(days=7)).strftime("%Y-%m-%d")  # tomorrow
 
 # ── Screenshot helper ──────────────────────────────────────────────────────────
 def screenshot(driver: webdriver.Chrome, label: str) -> str:
@@ -148,44 +149,109 @@ def set_date_via_js(driver, date_str):
 
 # ── Login ──────────────────────────────────────────────────────────────────────
 def login(driver, email, password):
+    """
+    3-step login: email → password → 2FA phone app → #/home.
+
+    The 2FA is approved entirely on the user's phone; the script waits up to
+    120 seconds for the URL to become .../home before continuing.
+    """
     print(f"\n[→] Opening {URL}")
     driver.get(URL)
-    time.sleep(1)
+    time.sleep(1.5)
     screenshot(driver, "page_loaded")
 
+    # ── Step 1: Email ──────────────────────────────────────────────────────────
     print("[→] Waiting for email field …")
     email_input = wait_visible(driver, By.CSS_SELECTOR, "input[data-testid='login-email']")
-    screenshot(driver, "email_field_visible")
     email_input.clear()
     email_input.send_keys(email)
     screenshot(driver, "email_entered")
-    print(f"  [✓] Email: {email}")
+    print(f"  [✓] Email entered: {email}")
 
-    print("[→] Clicking Next …")
     wait_clickable(driver, By.CSS_SELECTOR, "button[type='submit'].mat-mdc-unelevated-button").click()
+    time.sleep(1.5)          # let the page transition settle
     ensure_main_window(driver)
     screenshot(driver, "next_clicked")
 
-    print("[→] Waiting for password field …")
+    # ── Step 2: Password ───────────────────────────────────────────────────────
+    print("[→] Looking for password field …")
+    pwd = None
+    for sel in [
+        "input[type='password']",
+        "input[name='password']",
+        "input[autocomplete='current-password']",
+        "input[data-testid='login-password']",
+    ]:
+        try:
+            pwd = WebDriverWait(driver, 8).until(
+                EC.visibility_of_element_located((By.CSS_SELECTOR, sel))
+            )
+            print(f"  [✓] Password field found: {sel}")
+            break
+        except TimeoutException:
+            continue
+
+    if pwd:
+        pwd.clear()
+        pwd.send_keys(password)
+        screenshot(driver, "password_entered")
+        try:
+            wait_clickable(
+                driver, By.CSS_SELECTOR,
+                "button[type='submit'].mat-mdc-unelevated-button", timeout=8
+            ).click()
+        except TimeoutException:
+            # Some builds submit on Enter
+            from selenium.webdriver.common.keys import Keys
+            pwd.send_keys(Keys.RETURN)
+        time.sleep(1)
+        ensure_main_window(driver)
+        screenshot(driver, "password_submitted")
+    else:
+        print("  [!] Password field not found — may have gone straight to 2FA")
+        screenshot(driver, "no_password_field")
+
+    # ── Step 3: 2FA — wait for user to approve on phone ───────────────────────
+    print("\n" + "─" * 60)
+    print("  ⚠️  Complete 2FA on your phone now.")
+    print("      Waiting up to 120 seconds for #/home …")
+    print("─" * 60 + "\n")
+
+    def _at_home(d):
+        """Return True only once the app has fully landed on the home page."""
+        try:
+            ensure_main_window(d)
+            url = d.current_url
+            return "/home" in url
+        except Exception:
+            return False
+
     try:
-        pwd = wait_visible(driver, By.CSS_SELECTOR, "input[type='password']")
+        WebDriverWait(driver, 120).until(_at_home)
     except TimeoutException:
-        pwd = wait_visible(driver, By.CSS_SELECTOR, "input[name='password']")
+        screenshot(driver, "login_timeout")
+        raise RuntimeError(
+            "2FA not completed within 120 seconds, "
+            f"still on: {driver.current_url}"
+        )
 
-    screenshot(driver, "password_field_visible")
-    pwd.clear()
-    pwd.send_keys(password)
-    screenshot(driver, "password_entered")
-
-    print("[→] Submitting …")
-    wait_clickable(driver, By.CSS_SELECTOR, "button[type='submit'].mat-mdc-unelevated-button").click()
+    # ── Home page stabilisation ────────────────────────────────────────────────
+    time.sleep(2)                    # let Angular finish rendering
     ensure_main_window(driver)
-    screenshot(driver, "submit_clicked")
 
-    WebDriverWait(driver, TIMEOUT).until(lambda d: "#/login" not in d.current_url)
-    time.sleep(1)
+    # Wait until at least the desk-booking card is in the DOM
+    try:
+        wait_visible(
+            driver, By.CSS_SELECTOR,
+            "[data-testid='home-add-booking-workstation']",
+            timeout=20
+        )
+        print("  [✓] Home page ready")
+    except TimeoutException:
+        print("  [!] Desk card not yet visible — continuing anyway")
+
     screenshot(driver, "login_success")
-    print(f"  [✓] Logged in — on: {driver.current_url}")
+    print(f"  [✓] Authenticated — on: {driver.current_url}")
 
 
 # ── Book a Desk ────────────────────────────────────────────────────────────────
@@ -228,26 +294,6 @@ def book_desk(driver):
     screenshot(driver, "date_set")
     print(f"  [✓] Date: {BOOKING_DATE}")
 
-    # ── 4. Set start time ──────────────────────────────────────────────────────
-    print(f"[→] Setting start time to {START_TIME} …")
-    try:
-        select_mat_option(driver, "form-workstation-start-time-select", START_TIME)
-        screenshot(driver, "start_time_set")
-        print(f"  [✓] Start time: {START_TIME}")
-    except (ValueError, TimeoutException) as e:
-        print(f"  [!] Could not set start time: {e}")
-        screenshot(driver, "start_time_error")
-
-    # ── 5. Set end time ────────────────────────────────────────────────────────
-    print(f"[→] Setting end time to {END_TIME} …")
-    try:
-        select_mat_option(driver, "form-workstation-end-time-select", END_TIME)
-        screenshot(driver, "end_time_set")
-        print(f"  [✓] End time: {END_TIME}")
-    except (ValueError, TimeoutException) as e:
-        print(f"  [!] Could not set end time: {e}")
-        screenshot(driver, "end_time_error")
-
     # ── 6. Click "Search Sites" ────────────────────────────────────────────────
     print("[→] Clicking Search Sites …")
     # Try data-testid first, then fall back to text content
@@ -286,25 +332,6 @@ def book_desk(driver):
             print("  [!] Search button not found — screenshot saved")
 
     screenshot(driver, "results_page")
-
-
-# ── Entry point ────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    print(f"[i] Screenshots → ./{SCREENSHOTS}/")
-    driver = build_driver(HEADLESS)
-    try:
-        login(driver, EMAIL, PASSWORD)
-        book_desk(driver)
-        select_desk_and_confirm(driver, desk_name="BCN 21")
-        time.sleep(3)
-    except Exception as e:
-        print(f"[✗] Fatal error: {e}")
-        screenshot(driver, "fatal_error")
-        raise
-    finally:
-        driver.quit()
-        print(f"\n[✓] Done — {screenshot.counter} screenshots in ./{SCREENSHOTS}/")
-
 
 # ── Map: find and click BCN 21, then confirm ──────────────────────────────────
 def select_desk_and_confirm(driver, desk_name="BCN 21"):
@@ -436,3 +463,20 @@ def select_desk_and_confirm(driver, desk_name="BCN 21"):
     time.sleep(1.5)
     screenshot(driver, "booking_confirmed")
     print("  [✓] Booking confirmed! ✅")
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print(f"[i] Screenshots → ./{SCREENSHOTS}/")
+    driver = build_driver(HEADLESS)
+    try:
+        login(driver, EMAIL, PASSWORD)
+        book_desk(driver)
+        select_desk_and_confirm(driver, desk_name="BCN 21")
+        time.sleep(3)
+    except Exception as e:
+        print(f"[✗] Fatal error: {e}")
+        screenshot(driver, "fatal_error")
+        raise
+    finally:
+        driver.quit()
+        print(f"\n[✓] Done — {screenshot.counter} screenshots in ./{SCREENSHOTS}/")
