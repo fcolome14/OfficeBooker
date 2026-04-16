@@ -1,10 +1,15 @@
 """
 Bookker Login + Desk Booking Automation
 Logs in, clicks Desk, configures the booking form, and searches for sites.
+
+2FA: Detects the Microsoft number-matching prompt, sends the number to you
+     via Telegram (and/or email), then waits for you to tap it on your phone.
 """
 
 import os
 import time
+import smtplib
+import requests
 from datetime import datetime, timedelta
 from pathlib import Path
 from selenium import webdriver
@@ -14,7 +19,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.common.action_chains import ActionChains
-from dotenv import load_dotenv, dotenv_values 
+from dotenv import load_dotenv, dotenv_values
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -22,14 +27,30 @@ load_dotenv(Path(__file__).parent / ".env")
 EMAIL    = os.environ["EMAIL"]
 PASSWORD = os.environ["PASSWORD"]
 
+# ── 2FA Notification config ────────────────────────────────────────────────────
+# Set whichever channels you want to use in your .env file.
+# At least one should be configured.
+
+# Telegram — create a bot via @BotFather, get your chat_id via @userinfobot
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")   # e.g. "123456:ABCdef..."
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")   # e.g. "987654321"
+
+# Email (Gmail example — use an App Password, not your real password)
+EMAIL_SENDER   = os.getenv("NOTIF_EMAIL_SENDER",   "")     # e.g. "you@gmail.com"
+EMAIL_PASSWORD = os.getenv("NOTIF_EMAIL_PASSWORD", "")     # Gmail App Password
+EMAIL_RECEIVER = os.getenv("NOTIF_EMAIL_RECEIVER", "")     # where to receive alert
+
+# Slack — create an Incoming Webhook at api.slack.com/apps
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")     # e.g. "https://hooks.slack.com/..."
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 URL         = "https://webapp.bookkercorp.com/#/login"
 TIMEOUT     = 15
 HEADLESS    = os.getenv("HEADLESS", "false").lower() == "true"
 SCREENSHOTS = "screenshots"
 
-# Booking config — date must be in the future; times as they appear in the dropdown
-BOOKING_DATE       = (datetime.today() + timedelta(days=7)).strftime("%Y-%m-%d")  # tomorrow
+BOOKING_DATE = (datetime.today() + timedelta(days=14)).strftime("%Y-%m-%d")
+
 
 # ── Screenshot helper ──────────────────────────────────────────────────────────
 def screenshot(driver: webdriver.Chrome, label: str) -> str:
@@ -41,6 +62,123 @@ def screenshot(driver: webdriver.Chrome, label: str) -> str:
     return path
 
 screenshot.counter = 0
+
+
+# ── 2FA Notification helpers ───────────────────────────────────────────────────
+def notify_telegram(number: str) -> bool:
+    """Send auth number via Telegram bot. Returns True on success."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": (
+                f"🔐 *Microsoft Auth Required*\n\n"
+                f"Tap *{number}* in Microsoft Authenticator\n\n"
+                f"_(Script is waiting…)_"
+            ),
+            "parse_mode": "Markdown",
+        }
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.ok:
+            print(f"  [✓] Telegram notified — tap {number} on your phone")
+            return True
+        else:
+            print(f"  [!] Telegram error: {resp.text}")
+    except Exception as e:
+        print(f"  [!] Telegram exception: {e}")
+    return False
+
+
+# def notify_email(number: str) -> bool:
+#     """Send auth number via email. Returns True on success."""
+#     if not EMAIL_SENDER or not EMAIL_PASSWORD or not EMAIL_RECEIVER:
+#         return False
+#     try:
+#         subject = "Microsoft Auth Required"
+#         body    = f"Tap {number} in Microsoft Authenticator.\n\nThe script is waiting for your approval."
+#         message = f"Subject: {subject}\n\n{body}"
+#         with smtplib.SMTP("smtp.gmail.com", 587) as server:
+#             server.starttls()
+#             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+#             server.sendmail(EMAIL_SENDER, EMAIL_RECEIVER, message)
+#         print(f"  [✓] Email sent to {EMAIL_RECEIVER} — tap {number} on your phone")
+#         return True
+#     except Exception as e:
+#         print(f"  [!] Email exception: {e}")
+#     return False
+
+
+def notify_slack(number: str) -> bool:
+    """Send auth number via Slack webhook. Returns True on success."""
+    if not SLACK_WEBHOOK_URL:
+        return False
+    try:
+        payload = {"text": f":key: *Microsoft Auth Required* — tap *{number}* in Authenticator"}
+        resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
+        if resp.ok:
+            print(f"  [✓] Slack notified — tap {number} on your phone")
+            return True
+        else:
+            print(f"  [!] Slack error: {resp.text}")
+    except Exception as e:
+        print(f"  [!] Slack exception: {e}")
+    return False
+
+
+def send_auth_number(number: str):
+    """
+    Broadcast the auth number across all configured channels.
+    Falls back to a console prompt if nothing is configured.
+    """
+    sent = False
+    sent |= notify_telegram(number)
+    # sent |= notify_email(number)
+    sent |= notify_slack(number)
+
+    if not sent:
+        # No channels configured — just print loudly
+        print("\n" + "═" * 60)
+        print(f"  🔐  TAP  →  {number}  ←  IN MICROSOFT AUTHENTICATOR")
+        print("═" * 60 + "\n")
+
+
+# ── 2FA detection ──────────────────────────────────────────────────────────────
+
+# Selectors that Microsoft uses for the number-matching display
+# (these can change with Microsoft UI updates)
+_NUMBER_SELECTORS = [
+    "#idRichContext_DisplaySign",           # classic number-match
+    "[data-testid='displaySign']",
+    ".displaySign",
+    "#idDiv_SAOTCC_OTC_ElementContainer",
+    "div.display-sign",
+    "[aria-label*='number']",
+]
+
+def _try_get_auth_number(driver) -> str | None:
+    """
+    Return the 2-digit number shown on the Microsoft number-match screen,
+    or None if the screen isn't visible yet.
+    """
+    for sel in _NUMBER_SELECTORS:
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, sel)
+            text = el.text.strip()
+            if text and text.isdigit() and len(text) <= 3:
+                return text
+        except NoSuchElementException:
+            continue
+    return None
+
+
+def _is_on_home(driver) -> bool:
+    try:
+        ensure_main_window(driver)
+        return "/home" in driver.current_url
+    except Exception:
+        return False
 
 
 # ── Driver factory ─────────────────────────────────────────────────────────────
@@ -81,7 +219,6 @@ def ensure_main_window(driver):
 
 # ── Step helpers ───────────────────────────────────────────────────────────────
 def dismiss_cookie_banner(driver):
-    """Accept cookie banner if present."""
     try:
         btn = WebDriverWait(driver, 5).until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "[data-testid='cookie-consent-button']"))
@@ -94,15 +231,9 @@ def dismiss_cookie_banner(driver):
 
 
 def select_mat_option(driver, select_testid, value_text):
-    """
-    Open a mat-select by data-testid and pick the option matching value_text.
-    Falls back to partial match if exact match not found.
-    """
     trigger = wait_clickable(driver, By.CSS_SELECTOR, f"[data-testid='{select_testid}']")
     trigger.click()
     time.sleep(0.5)
-
-    # Options appear in an overlay panel
     options = WebDriverWait(driver, TIMEOUT).until(
         EC.presence_of_all_elements_located((By.CSS_SELECTOR, "mat-option .mdc-list-item__primary-text"))
     )
@@ -110,7 +241,6 @@ def select_mat_option(driver, select_testid, value_text):
         if opt.text.strip() == value_text:
             opt.click()
             return
-    # Fallback: partial match
     for opt in options:
         if value_text in opt.text:
             opt.click()
@@ -119,11 +249,6 @@ def select_mat_option(driver, select_testid, value_text):
 
 
 def set_date_via_js(driver, date_str):
-    """
-    The date input is readonly + uses mat-datepicker.
-    Inject the value via JS and fire Angular/DOM events so the framework
-    picks it up, then close the calendar if it opened.
-    """
     inp = wait_visible(driver, By.CSS_SELECTOR, "[data-testid='form-workstation-date-picker']")
     driver.execute_script("""
         var input = arguments[0];
@@ -134,13 +259,9 @@ def set_date_via_js(driver, date_str):
         input.dispatchEvent(new Event('change', { bubbles: true }));
         input.dispatchEvent(new Event('blur',   { bubbles: true }));
     """, inp, date_str)
-
-    # Also try clicking the input to open the picker and then close it
-    # so Angular registers the change
     try:
         inp.click()
         time.sleep(0.4)
-        # Press Escape to close the calendar overlay without changing anything
         from selenium.webdriver.common.keys import Keys
         inp.send_keys(Keys.ESCAPE)
     except Exception:
@@ -150,10 +271,12 @@ def set_date_via_js(driver, date_str):
 # ── Login ──────────────────────────────────────────────────────────────────────
 def login(driver, email, password):
     """
-    3-step login: email → password → 2FA phone app → #/home.
+    3-step login: email → password → 2FA (number match) → #/home.
 
-    The 2FA is approved entirely on the user's phone; the script waits up to
-    120 seconds for the URL to become .../home before continuing.
+    When the Microsoft number-match screen appears the script:
+      1. Reads the 2-digit number from the page.
+      2. Sends it to you via Telegram / email / Slack.
+      3. Waits up to 120 s for you to tap the matching number on your phone.
     """
     print(f"\n[→] Opening {URL}")
     driver.get(URL)
@@ -169,7 +292,7 @@ def login(driver, email, password):
     print(f"  [✓] Email entered: {email}")
 
     wait_clickable(driver, By.CSS_SELECTOR, "button[type='submit'].mat-mdc-unelevated-button").click()
-    time.sleep(1.5)          # let the page transition settle
+    time.sleep(1.5)
     ensure_main_window(driver)
     screenshot(driver, "next_clicked")
 
@@ -201,7 +324,6 @@ def login(driver, email, password):
                 "button[type='submit'].mat-mdc-unelevated-button", timeout=8
             ).click()
         except TimeoutException:
-            # Some builds submit on Enter
             from selenium.webdriver.common.keys import Keys
             pwd.send_keys(Keys.RETURN)
         time.sleep(1)
@@ -211,35 +333,45 @@ def login(driver, email, password):
         print("  [!] Password field not found — may have gone straight to 2FA")
         screenshot(driver, "no_password_field")
 
-    # ── Step 3: 2FA — wait for user to approve on phone ───────────────────────
-    print("\n" + "─" * 60)
-    print("  ⚠️  Complete 2FA on your phone now.")
-    print("      Waiting up to 120 seconds for #/home …")
-    print("─" * 60 + "\n")
+    # ── Step 3: 2FA — detect number, notify user, wait for approval ───────────
+    print("\n[→] Watching for Microsoft 2FA screen …")
 
-    def _at_home(d):
-        """Return True only once the app has fully landed on the home page."""
-        try:
-            ensure_main_window(d)
-            url = d.current_url
-            return "/home" in url
-        except Exception:
-            return False
+    MAX_WAIT        = 120   # total seconds to wait for home
+    POLL_INTERVAL   = 1     # seconds between checks
+    notified        = False
+    elapsed         = 0
 
-    try:
-        WebDriverWait(driver, 120).until(_at_home)
-    except TimeoutException:
+    while elapsed < MAX_WAIT:
+        ensure_main_window(driver)
+
+        # Success — already on home
+        if _is_on_home(driver):
+            break
+
+        # Try to read the number-match digit
+        auth_number = _try_get_auth_number(driver)
+
+        if auth_number and not notified:
+            screenshot(driver, "2fa_number_screen")
+            print(f"\n  [🔑] Number match detected: {auth_number}")
+            send_auth_number(auth_number)
+            notified = True
+
+        time.sleep(POLL_INTERVAL)
+        elapsed += POLL_INTERVAL
+
+    else:
+        # Loop exhausted without reaching home
         screenshot(driver, "login_timeout")
         raise RuntimeError(
-            "2FA not completed within 120 seconds, "
+            f"2FA not completed within {MAX_WAIT} seconds, "
             f"still on: {driver.current_url}"
         )
 
     # ── Home page stabilisation ────────────────────────────────────────────────
-    time.sleep(2)                    # let Angular finish rendering
+    time.sleep(2)
     ensure_main_window(driver)
 
-    # Wait until at least the desk-booking card is in the DOM
     try:
         wait_visible(
             driver, By.CSS_SELECTOR,
@@ -256,10 +388,8 @@ def login(driver, email, password):
 
 # ── Book a Desk ────────────────────────────────────────────────────────────────
 def book_desk(driver):
-    # Dismiss cookie banner if shown
     dismiss_cookie_banner(driver)
 
-    # ── 1. Click "Lloc" (Desk) card ────────────────────────────────────────────
     print("[→] Clicking Desk (Lloc) card …")
     desk_card = wait_clickable(driver, By.CSS_SELECTOR, "[data-testid='home-add-booking-workstation']")
     desk_card.click()
@@ -268,16 +398,13 @@ def book_desk(driver):
     screenshot(driver, "desk_card_clicked")
     print("  [✓] Desk card clicked")
 
-    # ── 2. Enable "Llocs de reserva única" toggle ──────────────────────────────
     print("[→] Enabling 'Llocs de reserva única' toggle …")
-    # The toggle label id is mat-mdc-slide-toggle-1-label; click its button
     toggle_btn = wait_clickable(
         driver, By.CSS_SELECTOR,
         "button[id='mat-mdc-slide-toggle-1-button'], "
         "mat-slide-toggle button, "
         ".mat-mdc-slide-toggle button"
     )
-    # Only click if not already checked
     is_checked = toggle_btn.get_attribute("aria-checked") == "true"
     if not is_checked:
         toggle_btn.click()
@@ -287,16 +414,13 @@ def book_desk(driver):
         print("  [i] Toggle already enabled")
     screenshot(driver, "toggle_enabled")
 
-    # ── 3. Set date ────────────────────────────────────────────────────────────
     print(f"[→] Setting date to {BOOKING_DATE} …")
     set_date_via_js(driver, BOOKING_DATE)
     time.sleep(0.5)
     screenshot(driver, "date_set")
     print(f"  [✓] Date: {BOOKING_DATE}")
 
-    # ── 6. Click "Search Sites" ────────────────────────────────────────────────
     print("[→] Clicking Search Sites …")
-    # Try data-testid first, then fall back to text content
     search_btn = None
     for selector in [
         "[data-testid='form-workstation-search-button']",
@@ -316,7 +440,6 @@ def book_desk(driver):
         screenshot(driver, "search_clicked")
         print("  [✓] Search clicked")
     else:
-        # XPath fallback — button containing "Cerca" or "Search"
         try:
             search_btn = wait_clickable(
                 driver, By.XPATH,
@@ -333,29 +456,14 @@ def book_desk(driver):
 
     screenshot(driver, "results_page")
 
+
 # ── Map: find and click BCN 21, then confirm ──────────────────────────────────
 def select_desk_and_confirm(driver, desk_name="BCN 21"):
-    """
-    Click the target desk on the Leaflet interactive floor-plan map.
-    Desks are SVG <path class="resource leaflet-interactive"> elements with
-    NO name attributes — we identify BCN 21 through its Leaflet tooltip.
-
-    Strategy 1 — Leaflet JS API:
-        Iterate every layer on the map; if its tooltip content matches
-        desk_name (whitespace-normalised), fire a click event on that layer.
-
-    Strategy 2 — hover scan:
-        Move the mouse over every .resource path; read the tooltip that
-        appears; stop when it matches desk_name, then click.
-    """
-
-    # ── 1. Wait for the map to fully render ────────────────────────────────────
     print("[→] Waiting for Leaflet map to load …")
     time.sleep(2)
     screenshot(driver, "map_loaded")
     print(f"[→] Searching for desk '{desk_name}' …")
 
-    # ── 2a. Strategy 1 — Leaflet JavaScript API ────────────────────────────────
     JS_CLICK = r"""
         var target = arguments[0];
         var norm = function(s){ return s.replace(/\s+/g,' ').trim(); };
@@ -409,7 +517,6 @@ def select_desk_and_confirm(driver, desk_name="BCN 21"):
     if clicked:
         print("  [✓] Desk clicked via Leaflet JS API")
     else:
-        # ── 2b. Strategy 2 — hover every circle, read tooltip ─────────────────
         print("  [!] JS API did not fire — falling back to hover scan …")
         paths = driver.find_elements(By.CSS_SELECTOR, "path.resource.leaflet-interactive")
         print(f"      Found {len(paths)} desk circles on the map")
@@ -445,7 +552,6 @@ def select_desk_and_confirm(driver, desk_name="BCN 21"):
     time.sleep(0.8)
     screenshot(driver, "desk_clicked")
 
-    # ── 3. Wait for the confirmation modal ────────────────────────────────────
     print("[→] Waiting for confirmation modal …")
     try:
         modal_title = wait_visible(driver, By.CSS_SELECTOR, "[data-testid='resource-title']")
@@ -455,7 +561,6 @@ def select_desk_and_confirm(driver, desk_name="BCN 21"):
         screenshot(driver, "modal_not_found")
         raise RuntimeError("Confirmation modal did not appear after clicking the desk")
 
-    # ── 4. Click 'Reserva' ────────────────────────────────────────────────────
     print("[→] Clicking 'Reserva' (Book) …")
     confirm_btn = wait_clickable(driver, By.CSS_SELECTOR, "[data-testid='confirm-button']")
     confirm_btn.click()
@@ -463,6 +568,7 @@ def select_desk_and_confirm(driver, desk_name="BCN 21"):
     time.sleep(1.5)
     screenshot(driver, "booking_confirmed")
     print("  [✓] Booking confirmed! ✅")
+
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
