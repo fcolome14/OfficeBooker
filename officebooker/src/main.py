@@ -39,11 +39,6 @@ PASSWORD = os.environ["PASSWORD"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]   # e.g. "123456:ABCdef..."
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]     # e.g. "987654321"
 
-# Email (Gmail example — use an App Password, not your real password)
-EMAIL_SENDER   = os.environ["NOTIF_EMAIL_SENDER"]       # e.g. "you@gmail.com"
-EMAIL_PASSWORD = os.environ["NOTIF_EMAIL_PASSWORD"]     # Gmail App Password
-EMAIL_RECEIVER = os.environ["NOTIF_EMAIL_RECEIVER"]     # where to receive alert
-
 # Slack — create an Incoming Webhook at api.slack.com/apps
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]     # e.g. "https://hooks.slack.com/..."
 
