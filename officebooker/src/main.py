@@ -10,6 +10,7 @@ import os
 import time
 import smtplib
 import requests
+import urllib3
 from datetime import datetime, timedelta
 from pathlib import Path
 from selenium import webdriver
@@ -20,6 +21,9 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.common.action_chains import ActionChains
 from dotenv import load_dotenv, dotenv_values
+
+# Corporate proxies inject self-signed certs — suppress the noisy warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -32,16 +36,16 @@ PASSWORD = os.environ["PASSWORD"]
 # At least one should be configured.
 
 # Telegram — create a bot via @BotFather, get your chat_id via @userinfobot
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")   # e.g. "123456:ABCdef..."
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")   # e.g. "987654321"
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]   # e.g. "123456:ABCdef..."
+TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]     # e.g. "987654321"
 
 # Email (Gmail example — use an App Password, not your real password)
-EMAIL_SENDER   = os.getenv("NOTIF_EMAIL_SENDER",   "")     # e.g. "you@gmail.com"
-EMAIL_PASSWORD = os.getenv("NOTIF_EMAIL_PASSWORD", "")     # Gmail App Password
-EMAIL_RECEIVER = os.getenv("NOTIF_EMAIL_RECEIVER", "")     # where to receive alert
+EMAIL_SENDER   = os.environ["NOTIF_EMAIL_SENDER"]       # e.g. "you@gmail.com"
+EMAIL_PASSWORD = os.environ["NOTIF_EMAIL_PASSWORD"]     # Gmail App Password
+EMAIL_RECEIVER = os.environ["NOTIF_EMAIL_RECEIVER"]     # where to receive alert
 
 # Slack — create an Incoming Webhook at api.slack.com/apps
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")     # e.g. "https://hooks.slack.com/..."
+SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]     # e.g. "https://hooks.slack.com/..."
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 URL         = "https://webapp.bookkercorp.com/#/login"
@@ -80,7 +84,8 @@ def notify_telegram(number: str) -> bool:
             ),
             "parse_mode": "Markdown",
         }
-        resp = requests.post(url, json=payload, timeout=10)
+        # verify=False bypasses corporate proxy self-signed certificate
+        resp = requests.post(url, json=payload, timeout=10, verify=False)
         if resp.ok:
             print(f"  [✓] Telegram notified — tap {number} on your phone")
             return True
@@ -116,7 +121,8 @@ def notify_slack(number: str) -> bool:
         return False
     try:
         payload = {"text": f":key: *Microsoft Auth Required* — tap *{number}* in Authenticator"}
-        resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
+        # verify=False bypasses corporate proxy self-signed certificate
+        resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10, verify=False)
         if resp.ok:
             print(f"  [✓] Slack notified — tap {number} on your phone")
             return True
@@ -275,7 +281,7 @@ def login(driver, email, password):
 
     When the Microsoft number-match screen appears the script:
       1. Reads the 2-digit number from the page.
-      2. Sends it to you via Telegram / email / Slack.
+      2. Sends it to you via Telegram / Slack.
       3. Waits up to 120 s for you to tap the matching number on your phone.
     """
     print(f"\n[→] Opening {URL}")
