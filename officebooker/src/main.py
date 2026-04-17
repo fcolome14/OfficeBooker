@@ -48,7 +48,8 @@ TIMEOUT     = 15
 HEADLESS    = os.getenv("HEADLESS", "false").lower() == "true"
 SCREENSHOTS = "screenshots"
 
-BOOKING_DATE = (datetime.today() + timedelta(days=14)).strftime("%Y-%m-%d")
+BOOKING_DATE = (datetime.today() + timedelta(days=7)).strftime("%Y-%m-%d")
+DESK = "BCN 21"
 
 
 # ── Screenshot helper ──────────────────────────────────────────────────────────
@@ -74,8 +75,9 @@ def notify_telegram(number: str) -> bool:
             "chat_id": TELEGRAM_CHAT_ID,
             "text": (
                 f"🔐 *Microsoft Auth Required*\n\n"
+                f"Booking desk {DESK} for {BOOKING_DATE} in BCN\n\n"
                 f"Tap *{number}* in Microsoft Authenticator\n\n"
-                f"_(Script is waiting…)_"
+                f"_(Validate the code sent to your Microsoft Authenticator)_"
             ),
             "parse_mode": "Markdown",
         }
@@ -83,6 +85,41 @@ def notify_telegram(number: str) -> bool:
         resp = requests.post(url, json=payload, timeout=10, verify=False)
         if resp.ok:
             print(f"  [✓] Telegram notified — tap {number} on your phone")
+            return True
+        else:
+            print(f"  [!] Telegram error: {resp.text}")
+    except Exception as e:
+        print(f"  [!] Telegram exception: {e}")
+    return False
+
+def notify_telegram_booking(success: bool = True, msg: str = "None") -> bool:
+    """ Notify via Telegram the result of the operation"""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+        if success:
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": (
+                    f"✅*Desk {DESK} booked succesfully!*\n"
+                    f"Location: BCN, Date: {BOOKING_DATE}\n"
+                ),
+                "parse_mode": "Markdown",
+            }
+        else:
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": (
+                    f"❌ *An error occurred*\n"
+                    f"Could not book desk {DESK} now. Detail: {msg}\n"
+                ),
+                "parse_mode": "Markdown",
+            }
+        # verify=False bypasses corporate proxy self-signed certificate
+        resp = requests.post(url, json=payload, timeout=10, verify=False)
+        if resp.ok:
             return True
         else:
             print(f"  [!] Telegram error: {resp.text}")
@@ -246,7 +283,9 @@ def select_mat_option(driver, select_testid, value_text):
         if value_text in opt.text:
             opt.click()
             return
-    raise ValueError(f"Option '{value_text}' not found in select '{select_testid}'")
+    err = f"Option '{value_text}' not found in select '{select_testid}'"
+    notify_telegram_booking(success=False, msg=err)
+    raise ValueError(err)
 
 
 def set_date_via_js(driver, date_str):
@@ -364,10 +403,9 @@ def login(driver, email, password):
     else:
         # Loop exhausted without reaching home
         screenshot(driver, "login_timeout")
-        raise RuntimeError(
-            f"2FA not completed within {MAX_WAIT} seconds, "
-            f"still on: {driver.current_url}"
-        )
+        err = f"2FA not completed within {MAX_WAIT} seconds, still on: {driver.current_url}"
+        notify_telegram_booking(success=False, msg=err)
+        raise RuntimeError(err)
 
     # ── Home page stabilisation ────────────────────────────────────────────────
     time.sleep(2)
@@ -519,10 +557,9 @@ def wait_for_high_demand_modal(driver, max_wait: int = 120):
         return
     except TimeoutException:
         screenshot(driver, "high_demand_modal_timeout")
-        raise RuntimeError(
-            f"High-demand modal did not disappear within {max_wait} seconds. "
-            "The site may still be searching — check the screenshot."
-        )
+        err = f"High-demand modal did not disappear within {max_wait} seconds. The site may still be searching — check the screenshot."
+        notify_telegram_booking(success=False, msg=err)
+        raise RuntimeError(err)
 
 
 # ── Map: find and click BCN 21, then confirm ──────────────────────────────────
@@ -616,10 +653,9 @@ def select_desk_and_confirm(driver, desk_name="BCN 21"):
             ensure_main_window(driver)
         else:
             screenshot(driver, "desk_not_found")
-            raise RuntimeError(
-                f"Could not locate desk '{desk_name}' on the map. "
-                "See 'desk_not_found.png' and inspect the SVG / Leaflet layers."
-            )
+            err = f"Could not locate desk '{desk_name}' on the map. See 'desk_not_found.png' and inspect the SVG / Leaflet layers."
+            notify_telegram_booking(success=False, msg=err)
+            raise RuntimeError(err)
 
     time.sleep(0.8)
     screenshot(driver, "desk_clicked")
@@ -631,7 +667,9 @@ def select_desk_and_confirm(driver, desk_name="BCN 21"):
         screenshot(driver, "confirm_modal_open")
     except TimeoutException:
         screenshot(driver, "modal_not_found")
-        raise RuntimeError("Confirmation modal did not appear after clicking the desk")
+        err = "Confirmation modal did not appear after clicking the desk"
+        notify_telegram_booking(success=False, msg=err)
+        raise RuntimeError(err)
 
     print("[→] Clicking 'Reserva' (Book) …")
     confirm_btn = wait_clickable(driver, By.CSS_SELECTOR, "[data-testid='confirm-button']")
@@ -640,6 +678,7 @@ def select_desk_and_confirm(driver, desk_name="BCN 21"):
     time.sleep(1.5)
     screenshot(driver, "booking_confirmed")
     print("  [✓] Booking confirmed! ✅")
+    notify_telegram_booking()
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -649,7 +688,7 @@ if __name__ == "__main__":
     try:
         login(driver, EMAIL, PASSWORD)
         book_desk(driver)
-        select_desk_and_confirm(driver, desk_name="BCN 21")
+        select_desk_and_confirm(driver, desk_name=DESK)
         time.sleep(3)
     except Exception as e:
         print(f"[✗] Fatal error: {e}")
