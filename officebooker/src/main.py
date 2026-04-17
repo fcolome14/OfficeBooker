@@ -463,10 +463,81 @@ def book_desk(driver):
     screenshot(driver, "results_page")
 
 
+# ── High-demand modal dismissal ───────────────────────────────────────────────
+def wait_for_high_demand_modal(driver, max_wait: int = 120):
+    """
+    Detects the 'Please wait… high demand' loading modal and waits for it
+    to disappear before continuing. Safe to call even if the modal never appears.
+
+    The modal is identified by its text content — multiple selectors are tried
+    so it keeps working if the app updates its markup.
+    """
+    MODAL_SELECTORS = [
+        # Text-based: look for the spinner overlay container
+        "//*[contains(text(),'Please wait') or contains(text(),'high demand') or contains(text(),'refining your search')]",
+        # Class-based fallbacks
+        ".cdk-overlay-container mat-dialog-container",
+        "mat-dialog-container",
+        ".mat-mdc-dialog-container",
+    ]
+
+    modal_found = False
+
+    # ── 1. Detect whether the modal is present ────────────────────────────────
+    for sel in MODAL_SELECTORS:
+        try:
+            by = By.XPATH if sel.startswith("/") else By.CSS_SELECTOR
+            driver.find_element(by, sel)
+            modal_found = True
+            print(f"  [⏳] High-demand modal detected — waiting up to {max_wait}s …")
+            screenshot(driver, "high_demand_modal")
+            break
+        except NoSuchElementException:
+            continue
+
+    if not modal_found:
+        print("  [i] No high-demand modal — proceeding immediately")
+        return
+
+    # ── 2. Wait for the modal to vanish ──────────────────────────────────────
+    # Strategy A: wait for the XPath text to disappear
+    try:
+        WebDriverWait(driver, max_wait).until_not(
+            EC.presence_of_element_located((
+                By.XPATH,
+                "//*[contains(text(),'Please wait') or contains(text(),'high demand') or contains(text(),'refining your search')]"
+            ))
+        )
+        print("  [✓] High-demand modal dismissed — map should be ready")
+        screenshot(driver, "high_demand_modal_gone")
+        return
+    except TimeoutException:
+        pass
+
+    # Strategy B: wait for mat-dialog-container to disappear
+    try:
+        WebDriverWait(driver, max_wait).until_not(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "mat-dialog-container"))
+        )
+        print("  [✓] High-demand modal dismissed (dialog container gone)")
+        screenshot(driver, "high_demand_modal_gone")
+        return
+    except TimeoutException:
+        screenshot(driver, "high_demand_modal_timeout")
+        raise RuntimeError(
+            f"High-demand modal did not disappear within {max_wait} seconds. "
+            "The site may still be searching — check the screenshot."
+        )
+
+
 # ── Map: find and click BCN 21, then confirm ──────────────────────────────────
 def select_desk_and_confirm(driver, desk_name="BCN 21"):
     print("[→] Waiting for Leaflet map to load …")
     time.sleep(2)
+
+    # Handle the 'Please wait… high demand' modal before touching the map
+    wait_for_high_demand_modal(driver)
+
     screenshot(driver, "map_loaded")
     print(f"[→] Searching for desk '{desk_name}' …")
 
